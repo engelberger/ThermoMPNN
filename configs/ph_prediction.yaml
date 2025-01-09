@@ -4,8 +4,8 @@ project: thermompnn_ph
 platform:
   thermompnn_dir: /media/iwe30/nvme/github/ThermoMPNN
   accel: cuda
-  train_workers: 1
-  val_workers: 1
+  train_workers: 12
+  val_workers: 12
 
 data_loc:
   ph_dir: data/ph
@@ -22,4 +22,11 @@ training:
   learn_rate: 1e-4
   mpnn_learn_rate: 1e-5
   epochs: 100
-  lr_schedule: true 
+  lr_schedule: true
+  
+  # Training monitoring settings
+  log_every_n_steps: 50
+  plot_every_n_epochs: 1
+  gradient_norm_logging: true
+  activation_histograms: true
+  monitor_save_dir: "training_plots" 
