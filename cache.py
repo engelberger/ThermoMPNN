@@ -1,39 +1,53 @@
 import os
-import uuid
 import pickle
-import functools
-import inspect
+import hashlib
+from functools import wraps
 
-def stringify_cache_key(key):
-    return uuid.uuid3(uuid.NAMESPACE_DNS, str(key)).hex
 
-def cache(cache_key, version=0.0, disable=False):
-    """Cache the result of a function call on disk for speedup"""
-    def inner_cache(f):
-        f_sig = inspect.signature(f)
-        @functools.wraps(f)
-        def cached_f(cfg, *args, **kwargs):
+def get_cache_dir():
+    """Get the cache directory path"""
+    # Use a local cache directory in the project
+    cache_dir = os.path.join(os.getcwd(), ".cache")
+    os.makedirs(cache_dir, exist_ok=True)
+    return cache_dir
 
-            # ensure that default args are properly passed to cache key
-            bound = f_sig.bind(cfg, *args, **kwargs)
-            bound.apply_defaults()
-            _, *args = bound.args
-            kwargs = bound.kwargs
 
-            key = stringify_cache_key(cache_key(cfg, *args, **kwargs))
-            cache_file = f"{cfg.platform.cache_dir}/functions/{f.__name__}/{version}/{key}.pkl"
-            if not disable:
-                try:
-                    with open(cache_file, "rb") as fh:
-                        ret = pickle.load(fh)
-                        return ret
-                except (FileNotFoundError, EOFError):
-                    pass
-            ret = f(cfg, *args, **kwargs)
-            cache_folder = "/".join(cache_file.split("/")[:-1])
+def cache(key_fn):
+    """Cache decorator that saves function outputs to disk"""
+
+    def decorator(func):
+        @wraps(func)
+        def wrapper(*args, **kwargs):
+            # Get cache directory
+            cache_dir = get_cache_dir()
+
+            # Generate cache key
+            if key_fn is None:
+                key = str(args) + str(kwargs)
+            else:
+                key = str(key_fn(*args, **kwargs))
+
+            # Create hash of key for filename
+            key_hash = hashlib.md5(key.encode()).hexdigest()
+
+            # Create cache folder for this function
+            cache_folder = os.path.join(cache_dir, func.__name__)
             os.makedirs(cache_folder, exist_ok=True)
-            with open(cache_file, "wb") as fh:
-                pickle.dump(ret, fh)
-                return ret
-        return cached_f
-    return inner_cache
+
+            cache_file = os.path.join(cache_folder, f"{key_hash}.pkl")
+
+            # Return cached result if it exists
+            if os.path.exists(cache_file):
+                with open(cache_file, "rb") as f:
+                    return pickle.load(f)
+
+            # Otherwise compute result and cache it
+            result = func(*args, **kwargs)
+            with open(cache_file, "wb") as f:
+                pickle.dump(result, f)
+
+            return result
+
+        return wrapper
+
+    return decorator

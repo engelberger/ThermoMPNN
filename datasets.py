@@ -14,7 +14,7 @@ from protein_mpnn_utils import alt_parse_PDB, parse_PDB
 from cache import cache
 
 
-ALPHABET = 'ACDEFGHIKLMNPQRSTVWY-'
+ALPHABET = "ACDEFGHIKLMNPQRSTVWY-"
 
 
 @cache(lambda cfg, pdb_file: pdb_file)
@@ -28,7 +28,8 @@ class Mutation:
     wildtype: str
     mutation: str
     ddG: Optional[float] = None
-    pdb: Optional[str] = ''
+    pdb: Optional[str] = ""
+    pH: Optional[float] = None
 
 
 def seq1_index_to_seq2_index(align, index):
@@ -37,21 +38,21 @@ def seq1_index_to_seq2_index(align, index):
 
     # first find the aligned index
     for aln_idx, char in enumerate(align.seqA):
-        if char != '-':
+        if char != "-":
             cur_seq1_index += 1
         if cur_seq1_index > index:
             break
-    
+
     # now the index in seq 2 cooresponding to aligned index
-    if align.seqB[aln_idx] == '-':
+    if align.seqB[aln_idx] == "-":
         return None
 
-    seq2_to_idx = align.seqB[:aln_idx+1]
+    seq2_to_idx = align.seqB[: aln_idx + 1]
     seq2_idx = aln_idx
     for char in seq2_to_idx:
-        if char == '-':
+        if char == "-":
             seq2_idx -= 1
-    
+
     if seq2_idx < 0:
         return None
 
@@ -67,23 +68,32 @@ class MegaScaleDataset(torch.utils.data.Dataset):
 
         fname = self.cfg.data_loc.megascale_csv
         # only load rows needed to save memory
-        df = pd.read_csv(fname, usecols=["ddG_ML", "mut_type", "WT_name", "aa_seq", "dG_ML"])
+        df = pd.read_csv(
+            fname, usecols=["ddG_ML", "mut_type", "WT_name", "aa_seq", "dG_ML"]
+        )
         # remove unreliable data and more complicated mutations
-        df = df.loc[df.ddG_ML != '-', :].reset_index(drop=True)
-        df = df.loc[~df.mut_type.str.contains("ins") & ~df.mut_type.str.contains("del") & ~df.mut_type.str.contains(":"), :].reset_index(drop=True)
+        df = df.loc[df.ddG_ML != "-", :].reset_index(drop=True)
+        df = df.loc[
+            ~df.mut_type.str.contains("ins")
+            & ~df.mut_type.str.contains("del")
+            & ~df.mut_type.str.contains(":"),
+            :,
+        ].reset_index(drop=True)
 
         self.df = df
 
         # load splits produced by mmseqs clustering
-        with open(self.cfg.data_loc.megascale_splits, 'rb') as f:
-            splits = pickle.load(f)  # this is a dict with keys train/val/test and items holding FULL PDB names for a given split
-            
+        with open(self.cfg.data_loc.megascale_splits, "rb") as f:
+            splits = pickle.load(
+                f
+            )  # this is a dict with keys train/val/test and items holding FULL PDB names for a given split
+
         self.split_wt_names = {
             "val": [],
             "test": [],
             "train": [],
             "train_s669": [],
-            "all": [], 
+            "all": [],
             "cv_train_0": [],
             "cv_train_1": [],
             "cv_train_2": [],
@@ -101,29 +111,37 @@ class MegaScaleDataset(torch.utils.data.Dataset):
             "cv_test_4": [],
         }
 
-        if 'reduce' not in cfg:
-            cfg.reduce = ''
+        if "reduce" not in cfg:
+            cfg.reduce = ""
 
         self.wt_seqs = {}
         self.mut_rows = {}
 
-        if self.split == 'all':
-            all_names = splits['train'] + splits['val'] + splits['test']
+        if self.split == "all":
+            all_names = splits["train"] + splits["val"] + splits["test"]
             self.split_wt_names[self.split] = all_names
         else:
-            if cfg.reduce == 'prot' and self.split == 'train':
+            if cfg.reduce == "prot" and self.split == "train":
                 n_prots_reduced = 58
-                self.split_wt_names[self.split] = np.random.choice(splits["train"], n_prots_reduced)
+                self.split_wt_names[self.split] = np.random.choice(
+                    splits["train"], n_prots_reduced
+                )
             else:
                 self.split_wt_names[self.split] = splits[self.split]
 
         self.wt_names = self.split_wt_names[self.split]
 
         for wt_name in tqdm(self.wt_names):
-            wt_rows = df.query('WT_name == @wt_name and mut_type == "wt"').reset_index(drop=True)
-            self.mut_rows[wt_name] = df.query('WT_name == @wt_name and mut_type != "wt"').reset_index(drop=True)
-            if type(cfg.reduce) is float and self.split == 'train':
-                self.mut_rows[wt_name] = self.mut_rows[wt_name].sample(frac=float(cfg.reduce), replace=False)
+            wt_rows = df.query('WT_name == @wt_name and mut_type == "wt"').reset_index(
+                drop=True
+            )
+            self.mut_rows[wt_name] = df.query(
+                'WT_name == @wt_name and mut_type != "wt"'
+            ).reset_index(drop=True)
+            if type(cfg.reduce) is float and self.split == "train":
+                self.mut_rows[wt_name] = self.mut_rows[wt_name].sample(
+                    frac=float(cfg.reduce), replace=False
+                )
 
             self.wt_seqs[wt_name] = wt_rows.aa_seq[0]
 
@@ -137,7 +155,7 @@ class MegaScaleDataset(torch.utils.data.Dataset):
         mut_data = self.mut_rows[wt_name]
         wt_seq = self.wt_seqs[wt_name]
 
-        wt_name = wt_name.split(".pdb")[0].replace("|",":")
+        wt_name = wt_name.split(".pdb")[0].replace("|", ":")
         pdb_file = os.path.join(self.cfg.data_loc.megascale_pdbs, f"{wt_name}.pdb")
         pdb = parse_pdb_cached(self.cfg, pdb_file)
         assert len(pdb[0]["seq"]) == len(wt_seq)
@@ -155,8 +173,8 @@ class MegaScaleDataset(torch.utils.data.Dataset):
             assert wt_seq[idx] == wt
             assert row.aa_seq[idx] == mut
 
-            if row.ddG_ML == '-':
-                continue # filter out any unreliable data
+            if row.ddG_ML == "-":
+                continue  # filter out any unreliable data
 
             ddG = -torch.tensor([float(row.ddG_ML)], dtype=torch.float32)
             mutations.append(Mutation(idx, wt, mut, ddG, wt_name))
@@ -173,33 +191,37 @@ class FireProtDataset(torch.utils.data.Dataset):
 
         filename = self.cfg.data_loc.fireprot_csv
 
-        df = pd.read_csv(filename).dropna(subset=['ddG'])
+        df = pd.read_csv(filename).dropna(subset=["ddG"])
         df = df.where(pd.notnull(df), None)
 
         self.seq_to_data = {}
         seq_key = "pdb_sequence"
 
         for wt_seq in df[seq_key].unique():
-            self.seq_to_data[wt_seq] = df.query(f"{seq_key} == @wt_seq").reset_index(drop=True)
+            self.seq_to_data[wt_seq] = df.query(f"{seq_key} == @wt_seq").reset_index(
+                drop=True
+            )
 
         self.df = df
 
         # load splits produced by mmseqs clustering
-        with open(self.cfg.data_loc.fireprot_splits, 'rb') as f:
-            splits = pickle.load(f)  # this is a dict with keys train/val/test and items holding FULL PDB names for a given split
-            
+        with open(self.cfg.data_loc.fireprot_splits, "rb") as f:
+            splits = pickle.load(
+                f
+            )  # this is a dict with keys train/val/test and items holding FULL PDB names for a given split
+
         self.split_wt_names = {
             "val": [],
             "test": [],
             "train": [],
             "homologue-free": [],
-            "all": []
+            "all": [],
         }
 
         self.wt_seqs = {}
         self.mut_rows = {}
 
-        if self.split == 'all':
+        if self.split == "all":
             all_names = list(splits.values())
             all_names = [j for sub in all_names for j in sub]
             self.split_wt_names[self.split] = all_names
@@ -209,9 +231,10 @@ class FireProtDataset(torch.utils.data.Dataset):
         self.wt_names = self.split_wt_names[self.split]
 
         for wt_name in self.wt_names:
-            self.mut_rows[wt_name] = df.query('pdb_id_corrected == @wt_name').reset_index(drop=True)
+            self.mut_rows[wt_name] = df.query(
+                "pdb_id_corrected == @wt_name"
+            ).reset_index(drop=True)
             self.wt_seqs[wt_name] = self.mut_rows[wt_name].pdb_sequence[0]
-
 
     def __len__(self):
         return len(self.wt_names)
@@ -222,24 +245,40 @@ class FireProtDataset(torch.utils.data.Dataset):
         seq = self.wt_seqs[wt_name]
         data = self.seq_to_data[seq]
 
-        pdb_file = os.path.join(self.cfg.data_loc.fireprot_pdbs, f"{data.pdb_id_corrected[0]}.pdb")
+        pdb_file = os.path.join(
+            self.cfg.data_loc.fireprot_pdbs, f"{data.pdb_id_corrected[0]}.pdb"
+        )
         pdb = parse_pdb_cached(self.cfg, pdb_file)
 
         mutations = []
         for i, row in data.iterrows():
             try:
                 pdb_idx = row.pdb_position
-                assert pdb[0]['seq'][pdb_idx] == row.wild_type == row.pdb_sequence[row.pdb_position]
-                
+                assert (
+                    pdb[0]["seq"][pdb_idx]
+                    == row.wild_type
+                    == row.pdb_sequence[row.pdb_position]
+                )
+
             except AssertionError:  # contingency for mis-alignments
-                align, *rest = pairwise2.align.globalxx(seq, pdb[0]['seq'].replace("-", "X"))
+                align, *rest = pairwise2.align.globalxx(
+                    seq, pdb[0]["seq"].replace("-", "X")
+                )
                 pdb_idx = seq1_index_to_seq2_index(align, row.pdb_position)
                 if pdb_idx is None:
                     continue
-                assert pdb[0]['seq'][pdb_idx] == row.wild_type == row.pdb_sequence[row.pdb_position]
+                assert (
+                    pdb[0]["seq"][pdb_idx]
+                    == row.wild_type
+                    == row.pdb_sequence[row.pdb_position]
+                )
 
-            ddG = None if row.ddG is None or isnan(row.ddG) else torch.tensor([row.ddG], dtype=torch.float32)
-            mut = Mutation(pdb_idx, pdb[0]['seq'][pdb_idx], row.mutation, ddG, wt_name)
+            ddG = (
+                None
+                if row.ddG is None or isnan(row.ddG)
+                else torch.tensor([row.ddG], dtype=torch.float32)
+            )
+            mut = Mutation(pdb_idx, pdb[0]["seq"][pdb_idx], row.mutation, ddG, wt_name)
             mutations.append(mut)
 
         return pdb, mutations
@@ -262,8 +301,10 @@ class ddgBenchDataset(torch.utils.data.Dataset):
         for wt_name in self.wt_names:
             wt_name_query = wt_name
             wt_name = wt_name[:-1]
-            self.mut_rows[wt_name] = df.query('PDB == @wt_name_query').reset_index(drop=True)
-            if 'S669' not in self.pdb_dir:
+            self.mut_rows[wt_name] = df.query("PDB == @wt_name_query").reset_index(
+                drop=True
+            )
+            if "S669" not in self.pdb_dir:
                 self.wt_seqs[wt_name] = self.mut_rows[wt_name].SEQ[0]
 
     def __len__(self):
@@ -278,7 +319,7 @@ class ddgBenchDataset(torch.utils.data.Dataset):
         wt_name = wt_name.split(".pdb")[0][:-1]
         mut_data = self.mut_rows[wt_name]
 
-        pdb_file = os.path.join(self.pdb_dir, wt_name + '.pdb')
+        pdb_file = os.path.join(self.pdb_dir, wt_name + ".pdb")
 
         # modified PDB parser returns list of residue IDs so we can align them easier
         pdb = alt_parse_PDB(pdb_file, chain)
@@ -291,16 +332,18 @@ class ddgBenchDataset(torch.utils.data.Dataset):
             try:
                 pos = mut_info[1:-1]
                 pdb_idx = resn_list.index(pos)
-            except ValueError:  # skip positions with insertion codes for now - hard to parse
+            except (
+                ValueError
+            ):  # skip positions with insertion codes for now - hard to parse
                 continue
             try:
-                assert pdb[0]['seq'][pdb_idx] == wtAA
+                assert pdb[0]["seq"][pdb_idx] == wtAA
             except AssertionError:  # contingency for mis-alignments
                 # if gaps are present, add these to idx (+10 to get any around the mutation site, kinda a hack)
-                if 'S669' in self.pdb_dir:
-                    gaps = [g for g in pdb[0]['seq'] if g == '-']
+                if "S669" in self.pdb_dir:
+                    gaps = [g for g in pdb[0]["seq"] if g == "-"]
                 else:
-                    gaps = [g for g in pdb[0]['seq'][:pdb_idx + 10] if g == '-']                
+                    gaps = [g for g in pdb[0]["seq"][: pdb_idx + 10] if g == "-"]
 
                 if len(gaps) > 0:
                     pdb_idx += len(gaps)
@@ -309,9 +352,13 @@ class ddgBenchDataset(torch.utils.data.Dataset):
 
                 if pdb_idx is None:
                     continue
-                assert pdb[0]['seq'][pdb_idx] == wtAA
-            ddG = None if row.DDG is None or isnan(row.DDG) else torch.tensor([row.DDG * -1.], dtype=torch.float32)
-            mut = Mutation(pdb_idx, pdb[0]['seq'][pdb_idx], mutAA, ddG, wt_name)
+                assert pdb[0]["seq"][pdb_idx] == wtAA
+            ddG = (
+                None
+                if row.DDG is None or isnan(row.DDG)
+                else torch.tensor([row.DDG * -1.0], dtype=torch.float32)
+            )
+            mut = Mutation(pdb_idx, pdb[0]["seq"][pdb_idx], mutAA, ddG, wt_name)
             mutations.append(mut)
 
         return pdb, mutations
@@ -337,3 +384,73 @@ class ComboDataset(torch.utils.data.Dataset):
         return self.mut_dataset[index]
 
 
+class PHDataset(torch.utils.data.Dataset):
+    """Dataset class for pH prediction data."""
+
+    def __init__(self, cfg, split):
+        self.cfg = cfg
+        self.split = split
+
+        # Load the consolidated pH dataset
+        filename = os.path.join(cfg.data_loc.ph_dir, "4_ph_consolidated.csv")
+        df = pd.read_csv(filename).dropna(subset=["pHopt"])
+        df = df.where(pd.notnull(df), None)
+
+        self.seq_to_data = {}
+        seq_key = "pdb_sequence"
+
+        for wt_seq in df[seq_key].unique():
+            self.seq_to_data[wt_seq] = df.query(f"{seq_key} == @wt_seq").reset_index(
+                drop=True
+            )
+
+        self.df = df
+
+        # Load splits produced by sequence clustering
+        splits_file = os.path.join(cfg.data_loc.ph_dir, "splits", "ph_clusters.pkl")
+        with open(splits_file, "rb") as f:
+            splits = pickle.load(f)
+
+        self.split_wt_names = {"val": [], "test": [], "train": [], "all": []}
+
+        self.wt_seqs = {}
+        self.mut_rows = {}
+
+        if self.split == "all":
+            all_names = list(splits.values())
+            all_names = [j for sub in all_names for j in sub]
+            self.split_wt_names[self.split] = all_names
+        else:
+            self.split_wt_names[self.split] = splits[self.split]
+
+        self.wt_names = self.split_wt_names[self.split]
+
+        for wt_name in self.wt_names:
+            self.mut_rows[wt_name] = df.query(
+                "pdb_id_corrected == @wt_name"
+            ).reset_index(drop=True)
+            self.wt_seqs[wt_name] = self.mut_rows[wt_name].pdb_sequence[0]
+
+    def __len__(self):
+        return len(self.wt_names)
+
+    def __getitem__(self, idx):
+        wt_name = self.wt_names[idx]
+        mut_rows = self.mut_rows[wt_name]
+
+        mutations = []
+        for _, row in mut_rows.iterrows():
+            mut = Mutation(
+                position=row.position,
+                wildtype=row.wild_type,
+                mutation=row.mutation,
+                pH=torch.tensor([row.pHopt], dtype=torch.float32),
+                pdb=wt_name,
+            )
+            mutations.append(mut)
+
+        pdb_file = os.path.join(
+            self.cfg.data_loc.ph_dir, "pdbs", "alphafold", f"{wt_name}.pdb"
+        )
+        pdb = parse_pdb_cached(self.cfg, pdb_file)
+        return pdb, mutations

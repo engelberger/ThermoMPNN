@@ -1,0 +1,25 @@
+name: ph_prediction
+project: thermompnn_ph
+
+platform:
+  thermompnn_dir: /media/iwe30/nvme/github/ThermoMPNN
+  accel: cuda
+  train_workers: 1
+  val_workers: 1
+
+data_loc:
+  ph_dir: data/ph
+
+model:
+  hidden_dims: [128, 64, 32]
+  num_final_layers: 3
+  freeze_weights: true
+  load_pretrained: true
+  lightattn: true
+  model_weights_path: vanilla_model_weights/v_48_020.pt
+
+training:
+  learn_rate: 1e-4
+  mpnn_learn_rate: 1e-5
+  epochs: 100
+  lr_schedule: true 

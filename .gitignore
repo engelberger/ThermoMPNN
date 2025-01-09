@@ -142,3 +142,5 @@ preprocessing/.ipynb_checkpoints
 
 jobs
 local.yaml
+ph/pHenv_data.csv
+ph/pHopt_data.csv
