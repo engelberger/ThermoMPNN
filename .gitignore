@@ -144,3 +144,8 @@ jobs
 local.yaml
 ph/pHenv_data.csv
 ph/pHopt_data.csv
+training_plots/error_by_range_epoch_0.png
+training_plots/predictions_epoch_0.png
+training_plots/training_curves_epoch_0.png
+.github/dependabot.yml
+training_plots/*

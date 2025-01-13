@@ -13,8 +13,13 @@ from Bio.PDB import *
 import plotly.graph_objects as go
 
 import sys
+import os
 
-sys.path.append("../")
+# Add the parent directory to the Python path
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+sys.path.append(parent_dir)
+
 from datasets import PHDataset
 from transfer_model_ph import TransferModelPH
 from train_thermompnn_ph import TransferModelPHPL
@@ -48,13 +53,17 @@ def get_trained_model(
     model_path: str, config: dict, checkpt_dir: str = "models/"
 ) -> nn.Module:
     """Load a trained pH prediction model."""
-    if os.path.isabs(model_path):
+    if os.path.exists(model_path):
         return TransferModelPHPL.load_from_checkpoint(model_path, cfg=config).model
     else:
-        model_loc = os.path.join(
-            config.platform.thermompnn_dir, checkpt_dir, model_path
-        )
-        return TransferModelPHPL.load_from_checkpoint(model_loc, cfg=config).model
+        # Try relative to the project root
+        model_loc = os.path.join(parent_dir, model_path)
+        if os.path.exists(model_loc):
+            return TransferModelPHPL.load_from_checkpoint(model_loc, cfg=config).model
+        else:
+            # Try in the checkpoints directory
+            model_loc = os.path.join(parent_dir, checkpt_dir, model_path)
+            return TransferModelPHPL.load_from_checkpoint(model_loc, cfg=config).model
 
 
 def run_prediction_default(
@@ -287,51 +296,45 @@ def bootstrap_confidence_intervals(
     return pd.DataFrame(ci).round(3)
 
 
-def main(cfg: dict, args: dict):
-    """Run comprehensive pH prediction benchmarking."""
+def main(cfg, args):
+    """Run benchmarking."""
     os.makedirs(args.save_dir, exist_ok=True)
 
-    # Load models to benchmark
+    # Initialize models
     models = {
         "ThermoMPNN-pH": get_trained_model(model_path=args.model_path, config=cfg)
     }
 
-    # Load benchmark datasets
+    # Initialize datasets
     datasets = {
+        "pH-train": PHDataset(cfg, "train"),
+        "pH-val": PHDataset(cfg, "val"),
         "pH-test": PHDataset(cfg, "test"),
-        "pH-homologue-free": PHDataset(cfg, "homologue-free"),
     }
 
+    # Run benchmarking
     results = []
     for name, model in models.items():
-        model = model.eval()
-        model = model.cuda()
-
+        model.eval()
         for dataset_name, dataset in datasets.items():
             if args.detailed_analysis:
                 results = run_prediction_with_analysis(
-                    name=name,
-                    model=model,
-                    dataset_name=dataset_name,
-                    dataset=dataset,
-                    results=results,
-                    save_dir=args.save_dir,
-                    analyze_structure=args.analyze_structure,
+                    name,
+                    model,
+                    dataset_name,
+                    dataset,
+                    results,
+                    args.save_dir,
+                    args.analyze_structure,
                 )
             else:
                 results = run_prediction_default(
-                    name=name,
-                    model=model,
-                    dataset_name=dataset_name,
-                    dataset=dataset,
-                    results=results,
+                    name, model, dataset_name, dataset, results
                 )
 
-    # Save overall results
-    df = pd.DataFrame(results)
-    print("\nOverall Results:")
-    print(df)
-    df.to_csv(os.path.join(args.save_dir, "benchmark_results.csv"))
+    # Save results
+    results_df = pd.DataFrame(results)
+    results_df.to_csv(os.path.join(args.save_dir, "benchmark_results.csv"))
 
     # Generate confidence intervals if detailed analysis
     if args.detailed_analysis:
@@ -369,7 +372,12 @@ if __name__ == "__main__":
     )
 
     args = parser.parse_args()
-    cfg = OmegaConf.load("../local.yaml")
+
+    # Load the pH prediction config
+    config_path = os.path.join(parent_dir, "configs/ph_prediction.yaml")
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Config file not found at {config_path}")
+    cfg = OmegaConf.load(config_path)
 
     with torch.no_grad():
         main(cfg, args)

@@ -19,9 +19,10 @@ model:
   model_weights_path: vanilla_model_weights/v_48_020.pt
 
 training:
+  batch_size: 128
   learn_rate: 1e-4
   mpnn_learn_rate: 1e-5
-  epochs: 100
+  epochs: 200
   lr_schedule: true
   
   # Training monitoring settings
@@ -29,4 +30,10 @@ training:
   plot_every_n_epochs: 1
   gradient_norm_logging: true
   activation_histograms: true
-  monitor_save_dir: "training_plots" 
+  monitor_save_dir: "training_plots"
+  
+  # Additional training settings
+  two_stage: false
+  val_check_interval: 1.0
+  accumulate_grad_batches: 1
+  precision: 32 

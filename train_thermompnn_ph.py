@@ -1,6 +1,11 @@
 import sys
 import wandb
 import os
+import matplotlib
+import numpy as np
+
+matplotlib.use("Agg")  # Use non-interactive backend
+import matplotlib.pyplot as plt
 
 import torch
 import torch.nn as nn
@@ -58,59 +63,96 @@ class TransferModelPHPL(pl.LightningModule):
         return self.model(*args)
 
     def shared_eval(self, batch, batch_idx, prefix):
-        assert len(batch) == 1
-        mut_pdb, mutations = batch[0]
-        pred, _ = self(mut_pdb, mutations)
+        """Shared evaluation step for training, validation, and testing"""
+        try:
+            # Extract mut_pdb and mutations
+            if isinstance(batch, list) and len(batch) > 0:
+                if isinstance(batch[0], list) and len(batch[0]) == 2:
+                    mut_pdb, mutations = batch[0]
+                elif len(batch) == 2:
+                    mut_pdb, mutations = batch
+                else:
+                    return {"loss": torch.tensor(0.0, requires_grad=True)}
+            else:
+                return {"loss": torch.tensor(0.0, requires_grad=True)}
 
-        ph_mses = []
-        ph_preds = []
-        ph_targets = []
+            # Forward pass
+            pred, _ = self(mut_pdb, mutations)
 
-        for mut, out in zip(mutations, pred):
-            if mut.pH is not None:  # Assuming pH is added to mutation objects
-                ph_mses.append(F.mse_loss(out["pH"], mut.pH))
-                for metric in self.metrics[f"{prefix}_metrics"]["pH"].values():
-                    metric.update(out["pH"], mut.pH)
-                ph_preds.append(out["pH"])
-                ph_targets.append(mut.pH)
+            # Calculate metrics
+            ph_mses = []
+            ph_preds = []
+            ph_targets = []
 
-        loss = 0.0 if len(ph_mses) == 0 else torch.stack(ph_mses).mean()
-        on_step = False
-        on_epoch = not on_step
+            for mut, out in zip(mutations, pred):
+                if mut.pH is not None:  # Only process if pH value exists
+                    ph_mses.append(F.mse_loss(out["pH"], mut.pH))
+                    for metric in self.metrics[f"{prefix}_metrics"]["pH"].values():
+                        metric.update(out["pH"], mut.pH)
+                    ph_preds.append(out["pH"])
+                    ph_targets.append(mut.pH)
 
-        output = "pH"
-        for name, metric in self.metrics[f"{prefix}_metrics"][output].items():
-            try:
-                metric.compute()
-            except ValueError:
-                continue
-            self.log(
-                f"{prefix}_{output}_{name}",
-                metric,
-                prog_bar=True,
-                on_step=on_step,
-                on_epoch=on_epoch,
-                batch_size=len(batch),
-            )
+            # Handle empty batch case
+            if len(ph_mses) == 0:
+                return {"loss": torch.tensor(0.0, requires_grad=True)}
 
-        # Return predictions and targets for monitoring
-        if len(ph_preds) > 0:
+            # Calculate loss and log metrics
+            loss = torch.stack(ph_mses).mean()
+
+            # Log metrics
+            output = "pH"
+            for name, metric in self.metrics[f"{prefix}_metrics"][output].items():
+                try:
+                    metric_val = metric.compute()
+                    self.log(
+                        f"{prefix}_{output}_{name}",
+                        metric_val,
+                        prog_bar=True,
+                        on_step=False,
+                        on_epoch=True,
+                        batch_size=len(ph_preds),
+                    )
+                except ValueError:
+                    continue
+
+            # Return predictions and targets for monitoring
             return {
                 "loss": loss,
-                "predictions": torch.stack(ph_preds),
-                "targets": torch.stack(ph_targets),
+                "predictions": torch.stack(ph_preds) if ph_preds else None,
+                "targets": torch.stack(ph_targets) if ph_targets else None,
             }
-        return {"loss": loss} if loss != 0.0 else None
+        except Exception as e:
+            # Only show debug output on actual errors
+            print(f"\nError in shared_eval: {str(e)}")
+            print(f"Batch structure: {type(batch)}")
+            if isinstance(batch, (list, tuple)):
+                print(f"Batch length: {len(batch)}")
+                if len(batch) > 0:
+                    print(f"First element type: {type(batch[0])}")
+                    if isinstance(batch[0], (list, tuple)) and len(batch[0]) > 0:
+                        print(f"First element contents: {[type(x) for x in batch[0]]}")
+            return {"loss": torch.tensor(0.0, requires_grad=True)}
 
     def training_step(self, batch, batch_idx):
+        """Training step"""
         outputs = self.shared_eval(batch, batch_idx, "train")
-        return outputs["loss"] if outputs is not None else None
+        if outputs is None:
+            return None
+        return outputs["loss"] if "loss" in outputs else None
 
     def validation_step(self, batch, batch_idx):
-        return self.shared_eval(batch, batch_idx, "val")
+        """Validation step"""
+        outputs = self.shared_eval(batch, batch_idx, "val")
+        if outputs is None:
+            return None
+        return outputs
 
     def test_step(self, batch, batch_idx):
-        return self.shared_eval(batch, batch_idx, "test")
+        """Test step"""
+        outputs = self.shared_eval(batch, batch_idx, "test")
+        if outputs is None:
+            return None
+        return outputs
 
     def configure_optimizers(self):
         if self.stage == 2:  # for second stage, drop LR by factor of 10
@@ -150,21 +192,60 @@ class TransferModelPHPL(pl.LightningModule):
             return opt
 
 
+# Worker initialization function
+def worker_init_fn(worker_id):
+    # Set numpy seed for this worker
+    np.random.seed(np.random.get_state()[1][0] + worker_id)
+    # Ensure matplotlib doesn't try to use GUI backend in workers
+    matplotlib.use("Agg")
+    # Disable parallel processing in workers to prevent deadlocks
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["MKL_NUM_THREADS"] = "1"
+    torch.set_num_threads(1)
+
+
+def collate_fn(batch):
+    """Custom collate function to handle batches of mutation data"""
+    if len(batch) == 0:
+        return []
+    return batch[0]  # Return first item since we're already batching in the dataset
+
+
 def train(cfg):
     """Main training function"""
-    # Set up datasets
-    train_workers = cfg.platform.train_workers if "train_workers" in cfg.platform else 4
-    val_workers = cfg.platform.val_workers if "val_workers" in cfg.platform else 4
+    # Set DataLoader worker settings
+    torch.multiprocessing.set_sharing_strategy("file_system")
+
+    # Set number of workers based on CPU count and config
+    n_workers = min(4, os.cpu_count() - 1) if os.cpu_count() > 1 else 0
 
     # Load pH datasets
     train_dataset = PHDataset(cfg, "train")
     val_dataset = PHDataset(cfg, "val")
 
+    # Create data loaders with modified settings
     train_loader = DataLoader(
-        train_dataset, collate_fn=lambda x: x, shuffle=True, num_workers=train_workers
+        train_dataset,
+        batch_size=cfg.training.batch_size,
+        shuffle=True,
+        num_workers=n_workers,
+        worker_init_fn=worker_init_fn,
+        persistent_workers=True if n_workers > 0 else False,
+        pin_memory=True,
+        prefetch_factor=2 if n_workers > 0 else None,
+        collate_fn=collate_fn,  # Use custom collate function
     )
+
     val_loader = DataLoader(
-        val_dataset, collate_fn=lambda x: x, num_workers=val_workers
+        val_dataset,
+        batch_size=cfg.training.batch_size,
+        shuffle=False,
+        num_workers=n_workers,
+        worker_init_fn=worker_init_fn,
+        persistent_workers=True if n_workers > 0 else False,
+        pin_memory=True,
+        prefetch_factor=2 if n_workers > 0 else None,
+        collate_fn=collate_fn,  # Use custom collate function
     )
 
     model_pl = TransferModelPHPL(cfg)
@@ -219,7 +300,21 @@ def train(cfg):
         max_epochs=max_ep,
         accelerator=cfg.platform.accel,
         devices=1,
+        enable_progress_bar=True,
+        enable_model_summary=True,
+        gradient_clip_val=None,  # No gradient clipping
+        deterministic=False,  # Allow non-deterministic operations for speed
+        precision=cfg.training.precision,  # Use precision from config
+        accumulate_grad_batches=cfg.training.accumulate_grad_batches,  # Gradient accumulation from config
     )
+
+    # Print dataset sizes
+    print(
+        f"\nTraining on {len(train_dataset)} examples with batch size {cfg.training.batch_size}"
+    )
+    print(f"Steps per epoch: {len(train_loader)}")
+    print(f"Validation set size: {len(val_dataset)}\n")
+
     trainer.fit(model_pl, train_loader, val_loader)
 
     if "two_stage" in cfg.training:  # sequential combo training
@@ -229,14 +324,30 @@ def train(cfg):
             # load new datasets for further training
             train_dataset = PHDataset(cfg, "train")
             val_dataset = PHDataset(cfg, "val")
+
+            # Use same DataLoader configuration as first stage
             train_loader = DataLoader(
                 train_dataset,
-                collate_fn=lambda x: x,
+                batch_size=cfg.training.batch_size,
                 shuffle=True,
-                num_workers=train_workers,
+                num_workers=n_workers,
+                worker_init_fn=worker_init_fn,
+                persistent_workers=True if n_workers > 0 else False,
+                pin_memory=True,
+                prefetch_factor=2 if n_workers > 0 else None,
+                collate_fn=collate_fn,  # Use custom collate function
             )
+
             val_loader = DataLoader(
-                val_dataset, collate_fn=lambda x: x, num_workers=val_workers
+                val_dataset,
+                batch_size=cfg.training.batch_size,
+                shuffle=False,
+                num_workers=n_workers,
+                worker_init_fn=worker_init_fn,
+                persistent_workers=True if n_workers > 0 else False,
+                pin_memory=True,
+                prefetch_factor=2 if n_workers > 0 else None,
+                collate_fn=collate_fn,  # Use custom collate function
             )
 
             model_pl.stage = 2

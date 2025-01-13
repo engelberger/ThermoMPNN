@@ -32,8 +32,6 @@ class PHTrainingMonitor(Callback):
         self.val_losses = []
         self.test_losses = []
         self.grad_norms = []
-        self.ph_targets = []
-        self.ph_predictions = []
         self.batch_idx = 0
 
         # For epoch-level tracking
@@ -44,14 +42,28 @@ class PHTrainingMonitor(Callback):
         self.epoch_val_losses = []
         self.epoch_test_losses = []
 
+        # For cumulative pH range analysis
+        self.all_targets = []
+        self.all_predictions = []
+
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-        """Log training metrics."""
+        """Log training metrics at the end of each batch"""
         if outputs is None:
             return
 
-        loss = outputs["loss"] if isinstance(outputs, dict) else outputs
-        self.current_train_loss.append(loss.item())
+        # Extract loss value
+        if isinstance(outputs, dict):
+            loss = outputs.get("loss", torch.tensor(0.0))
+        else:
+            loss = outputs if outputs is not None else torch.tensor(0.0)
 
+        # Ensure loss is a tensor
+        if not isinstance(loss, torch.Tensor):
+            loss = torch.tensor(loss)
+
+        self.train_losses.append(loss.item())
+
+        # Log gradient norms and other metrics at intervals
         if batch_idx % self.log_every_n_steps == 0:
             if self.gradient_norm_logging:
                 grad_norm = torch.nn.utils.clip_grad_norm_(
@@ -63,7 +75,6 @@ class PHTrainingMonitor(Callback):
                         {"gradient_norm": grad_norm, "global_step": trainer.global_step}
                     )
 
-            self.train_losses.append(loss.item())
             self.batch_idx = batch_idx
 
             # Log to wandb
@@ -71,6 +82,15 @@ class PHTrainingMonitor(Callback):
                 trainer.logger.experiment.log(
                     {"train_loss": loss.item(), "global_step": trainer.global_step}
                 )
+
+        # Log other metrics if available
+        if (
+            isinstance(outputs, dict)
+            and "predictions" in outputs
+            and "targets" in outputs
+        ):
+            self.train_predictions.extend(outputs["predictions"].detach().cpu().numpy())
+            self.train_targets.extend(outputs["targets"].detach().cpu().numpy())
 
     def on_train_epoch_end(self, trainer, pl_module):
         """Log training epoch metrics."""
@@ -98,8 +118,9 @@ class PHTrainingMonitor(Callback):
         if "predictions" in outputs and "targets" in outputs:
             predictions = outputs["predictions"]
             targets = outputs["targets"]
-            self.ph_targets.extend(targets.cpu().numpy())
-            self.ph_predictions.extend(predictions.cpu().numpy())
+            if predictions is not None and targets is not None:
+                self.all_predictions.extend(predictions.detach().cpu().numpy())
+                self.all_targets.extend(targets.detach().cpu().numpy())
 
     def on_validation_epoch_end(self, trainer, pl_module):
         """Generate validation plots and log metrics."""
@@ -132,8 +153,8 @@ class PHTrainingMonitor(Callback):
                         )
 
         # Clear storage for next epoch
-        self.ph_targets = []
-        self.ph_predictions = []
+        self.all_targets = []
+        self.all_predictions = []
         self.current_val_loss = []
 
     def on_test_batch_end(
@@ -218,14 +239,14 @@ class PHTrainingMonitor(Callback):
 
     def _plot_predictions(self, epoch: int):
         """Create scatter plot of predictions vs targets."""
-        if not self.ph_targets or not self.ph_predictions:
+        if not self.all_targets or not self.all_predictions:
             return
 
         plt.figure(figsize=(10, 10))
 
         # Convert to flat arrays for plotting
-        targets = np.array(self.ph_targets).flatten()
-        predictions = np.array(self.ph_predictions).flatten()
+        targets = np.array(self.all_targets).flatten()
+        predictions = np.array(self.all_predictions).flatten()
 
         # Create DataFrame for seaborn
         df = pd.DataFrame({"True pH": targets, "Predicted pH": predictions})
@@ -241,12 +262,12 @@ class PHTrainingMonitor(Callback):
 
     def _analyze_ph_ranges(self, epoch: int):
         """Analyze performance across pH ranges."""
-        if not self.ph_targets or not self.ph_predictions:
+        if not self.all_targets or not self.all_predictions:
             return
 
         # Convert to flat arrays
-        targets = np.array(self.ph_targets).flatten()
-        predictions = np.array(self.ph_predictions).flatten()
+        targets = np.array(self.all_targets).flatten()
+        predictions = np.array(self.all_predictions).flatten()
         errors = np.abs(predictions - targets)
 
         # Create DataFrame with pH ranges
@@ -290,3 +311,72 @@ class PHTrainingMonitor(Callback):
         plt.tight_layout()
         plt.savefig(os.path.join(self.save_dir, f"training_curves_epoch_{epoch}.png"))
         plt.close()
+
+    def plot_cumulative_ph_ranges(self):
+        """Create summary plot of prediction errors across pH ranges for all data."""
+        if not self.all_targets or not self.all_predictions:
+            return
+
+        # Convert to flat arrays
+        targets = np.array(self.all_targets).flatten()
+        predictions = np.array(self.all_predictions).flatten()
+        errors = np.abs(predictions - targets)
+
+        # Create DataFrame with pH ranges
+        df = pd.DataFrame(
+            {"True pH": targets, "Predicted pH": predictions, "Error": errors}
+        )
+        df["pH Range"] = pd.cut(
+            df["True pH"],
+            bins=[0, 4, 6, 8, 10, 14],
+            labels=["Very Acidic", "Acidic", "Neutral", "Basic", "Very Basic"],
+        )
+
+        # Create summary statistics
+        stats_df = (
+            df.groupby("pH Range")
+            .agg({"Error": ["mean", "std", "count"], "True pH": ["mean", "min", "max"]})
+            .round(3)
+        )
+
+        # Save statistics to CSV
+        stats_df.to_csv(os.path.join(self.save_dir, "ph_range_statistics.csv"))
+
+        # Create plots
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 12))
+
+        # Box plot
+        sns.boxplot(data=df, x="pH Range", y="Error", ax=ax1)
+        ax1.set_title("Prediction Error Distribution by pH Range")
+        ax1.set_ylabel("Absolute Error")
+
+        # Add sample counts
+        counts = df["pH Range"].value_counts()
+        for i, count in enumerate(counts[df["pH Range"].unique()]):
+            ax1.text(
+                i,
+                ax1.get_ylim()[1],
+                f"n={count}",
+                horizontalalignment="center",
+                verticalalignment="bottom",
+            )
+
+        # Scatter plot
+        sns.scatterplot(data=df, x="True pH", y="Predicted pH", alpha=0.1, ax=ax2)
+        ax2.plot([0, 14], [0, 14], "r--")  # Add diagonal line
+        ax2.set_title("Predicted vs True pH Values")
+
+        plt.tight_layout()
+        plt.savefig(os.path.join(self.save_dir, "cumulative_ph_analysis.png"))
+        plt.close()
+
+    def on_train_end(self, trainer, pl_module):
+        """Create final summary plots at the end of training."""
+        self.plot_cumulative_ph_ranges()
+
+        # Print summary statistics
+        print("\nFinal pH Range Statistics:")
+        stats_path = os.path.join(self.save_dir, "ph_range_statistics.csv")
+        if os.path.exists(stats_path):
+            stats_df = pd.read_csv(stats_path)
+            print(stats_df.to_string())
